@@ -1,0 +1,15 @@
+# User list System Requirements
+
+1. UI
+- Need simple user creation form with email, password, and name
+- On submit, create user in csv file
+- when create new user button is clicked, need to have a nice UI with a list of users
+
+
+2. Backend
+- Accepts requests from the UI, creates a new user in the csv file
+- list all users from the csv file
+- should have a efficient APIs for the UI to consume
+
+3. devops
+- bundle all the code into zip file
