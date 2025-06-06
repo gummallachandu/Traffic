@@ -1,3 +1,4 @@
+
 from autogen import GroupChat, GroupChatManager
 from src.agents.ba_agent import ba_agent
 from src.agents.user_agent import user_agent
@@ -8,6 +9,7 @@ import logging
 import time
 import json
 import re
+import streamlit as st
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ class WorkflowManager:
         self.last_message = None
         self.current_speaker = None
         self.current_message = None
-        self.allowed_transitions = {  # Add allowed transitions
+        self.allowed_transitions = {
             ba_agent: [user_agent],
             user_agent: [jira_agent, ba_agent],
             jira_agent: []
@@ -76,57 +78,61 @@ class WorkflowManager:
     
     def update_state(self, message: str, sender_name: str) -> None:
         """Update state based on message content and sender."""
-        # Update current speaker and message
         self.current_speaker = sender_name
         self.current_message = message
         
-        print("\n=== WorkflowManager State in update_state===")
-        print(self)  # This will call __str__
+        print("\n=== WorkflowManager State in update_state ===")
+        print(self)
         print("===========================\n")
         try:
-            # Log current state and message with proper state display
             logger.info(f"Processing message in state '{self.state}' from {sender_name}: {message[:100]}...")
             self.last_message = message
             
             if self.state == 'processing_requirements' and sender_name == 'BA_Agent':
-                # Look for JSON in tool response or direct JSON
                 json_match = re.search(r'\[\s*\{.*\}\s*\]', message, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
                     if self._is_valid_json_stories(json_str):
                         self.stories_json = json_str
-                        logger.info(f"Valid stories JSON received from BA Agent in state '{self.state}'")
+                        logger.info(f"Valid stories JSON received, transitioning to displaying_stories")
+                        st.session_state["stories_json"] = json_str  # Sync with Streamlit
+                        self.show_stories()
                         return
                 elif "error" in message.lower():
                     self.error_message = message
-                    logger.error(f"Error in BA_Agent response in state '{self.state}': {message}")
+                    logger.error(f"Error in BA_Agent response: {message}")
                     self.error()
+                
+            elif self.state == 'displaying_stories' and sender_name == 'User_Agent':
+                if "Stories displayed on UI" in message:
+                    logger.info("Stories displayed, transitioning to waiting_approval")
+                    self.wait_approval()
                 
             elif self.state == 'waiting_approval' and sender_name == 'User_Agent':
                 if message.startswith("Create these Jira stories:"):
-                    logger.info(f"Approval received in state '{self.state}', transitioning to creating_tickets")
+                    logger.info("Approval received, transitioning to creating_tickets")
                     self.create_tickets()
                 elif "revise" in message.lower():
-                    logger.info(f"Revision requested in state '{self.state}', transitioning back to processing_requirements")
+                    logger.info("Revision requested, transitioning back to processing_requirements")
                     self.retry()
                 else:
-                    logger.debug(f"Waiting for approval in state '{self.state}', no transition")
+                    logger.debug("Waiting for approval, no transition")
                 
             elif self.state == 'creating_tickets' and sender_name == 'Jira_Agent':
                 json_match = re.search(r'\[\s*".*"\s*\]', message, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
                     if self._is_valid_issue_keys(json_str):
-                        logger.info(f"Valid issue keys received in state '{self.state}', completing workflow")
+                        logger.info("Valid issue keys received, completing workflow")
                         self.complete()
                         return
                 elif "error" in message.lower():
                     self.error_message = "Invalid issue keys"
-                    logger.error(f"Error in Jira_Agent response in state '{self.state}': {message}")
+                    logger.error(f"Error in Jira_Agent response: {message}")
                     self.error()
                 
         except Exception as e:
-            logger.error(f"Error in update_state (current state: '{self.state}'): {str(e)}", exc_info=True)
+            logger.error(f"Error in update_state: {str(e)}", exc_info=True)
             self.error_message = str(e)
             self.error()
     
@@ -143,34 +149,28 @@ class WorkflowManager:
             return isinstance(keys, list)
         except json.JSONDecodeError:
             return False
-
+    
     def get_next_speaker_info(self):
         """Get detailed information about the next speaker and allowed transitions."""
         current_agent = self.get_current_agent()
         if not current_agent:
             return "No next speaker (terminal state)"
-            
-        # Get allowed transitions for current agent
+        
         allowed_next = self.allowed_transitions.get(current_agent, [])
         allowed_names = [agent.name for agent in allowed_next]
         
-        # Special case for displaying_stories state
-        if self.state == 'displaying_stories':
-            return f"User_Agent (forced transition from {self.current_speaker})"
-            
         return f"""
 Next Speaker: {current_agent.name}
 Allowed Transitions: {allowed_names}
 State-based Agent: {self.state_to_agent.get(self.state, 'None').name}
 """
-
+    
     def __str__(self):
         """Return a string representation of the WorkflowManager's state."""
-        # Format current message for display
         current_msg = self.current_message
         if current_msg and len(current_msg) > 100:
             current_msg = current_msg[:100] + "..."
-            
+        
         return f"""
 WorkflowManager State:
 ----------------------
@@ -189,126 +189,143 @@ State to Agent Mapping: {list(self.state_to_agent.keys())}
 def select_next_speaker(last_speaker, groupchat):
     """Select the next speaker based on workflow state."""
     workflow_manager = groupchat.workflow_manager
-    print("\n=== WorkflowManager State in Select NExt speaker===")
-    print(workflow_manager)  # This will call __str__
+    print("\n=== WorkflowManager State in select_next_speaker ===")
+    print(workflow_manager)
     print("===========================\n")
     
-    # Terminal states: stop the workflow
     if workflow_manager.state in ['completed', 'error']:
+        logger.info(f"Workflow reached terminal state: {workflow_manager.state}")
         return None
     
-    # Handoff: if we're displaying stories, User_Agent should speak
-    if workflow_manager.state == 'displaying_stories':
+    if workflow_manager.state in ['displaying_stories', 'waiting_approval']:
+        logger.info("Forcing User_Agent for displaying_stories/waiting_approval state")
         return user_agent
     
-    # Normal state-to-agent mapping
-    return workflow_manager.get_current_agent()
-
+    next_agent = workflow_manager.get_current_agent()
+    if next_agent:
+        logger.info(f"Selected next speaker: {next_agent.name} (state: {workflow_manager.state})")
+    return next_agent
 
 def start_agent_workflow(file_path: str) -> None:
     """Start the agent workflow to process requirements and create Jira stories."""
     logger.info(f"Starting agent workflow for file: {file_path}")
-    try:
-        # Initialize workflow manager
-        workflow_manager = WorkflowManager(file_path)
-        workflow_manager.start_processing()
-        
-        # Create group chat
-        groupchat = GroupChat(
-            agents=[ba_agent, user_agent, jira_agent],
-            messages=[],
-            max_round=100,
-            speaker_selection_method=select_next_speaker,
-            allowed_or_disallowed_speaker_transitions=workflow_manager.allowed_transitions,
-            speaker_transitions_type='allowed',
-            enable_clear_history=True
-        )
-        
-        groupchat.workflow_manager = workflow_manager
-        
-        # Create group chat manager with message handler
-        def create_manager():
+    max_attempts = 3
+    attempt = 1
+    
+    while attempt <= max_attempts:
+        try:
+            # Initialize workflow manager
+            workflow_manager = WorkflowManager(file_path)
+            workflow_manager.start_processing()
+            
+            # Create group chat
+            groupchat = GroupChat(
+                agents=[ba_agent, user_agent, jira_agent],
+                messages=[],
+                max_round=100,
+                speaker_selection_method=select_next_speaker,
+                allowed_or_disallowed_speaker_transitions=workflow_manager.allowed_transitions,
+                speaker_transitions_type='allowed',
+                enable_clear_history=True
+            )
+            
+            groupchat.workflow_manager = workflow_manager
+            
+            # Create group chat manager
             manager = GroupChatManager(
                 groupchat=groupchat,
                 llm_config=LLM_CONFIG
             )
             
+            # Store manager in session state
+            st.session_state["chat_manager"] = manager
+            
             def message_handler(recipient, messages, sender, config):
-                """Handle messages and control workflow transitions."""
                 logger.info(f"\n=== Message Handler Called ===")
                 logger.info(f"Sender: {sender.name}")
                 logger.info(f"Recipient: {recipient.name if recipient else 'None'}")
-                logger.info(f"Message count: {len(messages)}")
-                if messages:
-                    logger.info(f"Latest message: {messages[-1].get('content', '')[:100]}...")
+                logger.debug(f"Full messages: {messages}")
                 
                 workflow_manager = groupchat.workflow_manager
-                current_message = messages[-1].get('content', '') if messages else ''
                 current_speaker = sender.name
                 
-                # Update current speaker and message in workflow manager
-                workflow_manager.current_speaker = current_speaker
-                workflow_manager.current_message = current_message
+                if not messages or messages[-1] is None:
+                    logger.warning(f"Empty or None message received from {current_speaker}")
+                    return None, None
                 
-                print("\n=== WorkflowManager State in Message Handler===")
+                last_message = messages[-1]
+                current_message = ""
+                
+                if isinstance(last_message, dict):
+                    if 'content' in last_message and last_message['content']:
+                        current_message = last_message['content']
+                        logger.info(f"Message: {current_message[:100]}...")
+                    
+                    if 'tool_calls' in last_message and last_message['tool_calls']:
+                        tool_call = last_message['tool_calls'][0]
+                        logger.info(f"Tool call detected: {tool_call.get('function', {}).get('name', 'Unknown')}")
+                        if 'tool_response' in last_message and last_message['tool_response']:
+                            current_message = last_message['tool_response']
+                            logger.info(f"Tool response: {current_message[:100]}...")
+                        else:
+                            logger.debug("Waiting for tool response")
+                            return None, None
+                
+                if "Error: Function" in current_message:
+                    logger.error(f"Tool call failed: {current_message}")
+                    workflow_manager.error_message = current_message
+                    workflow_manager.error()
+                    return None, None
+                
+                if not current_message:
+                    logger.debug(f"No valid content in message from {current_speaker}, continuing")
+                    return None, None
+                
+                print("\n=== WorkflowManager State in message_handler ===")
                 print(workflow_manager)
                 print("===========================\n")
                 
-                # Special handling for BA Agent's story generation message
-                if (current_speaker == 'BA_Agent' and 
-                    "The Jira stories have been created" in current_message and 
-                    "Here are the generated stories:" in current_message):
-                    logger.info("BA Agent generated stories, transitioning to User Agent")
-                    workflow_manager.show_stories()  # Transition to displaying_stories state
-                    return user_agent, None
-                
-                # Update state based on message and sender
                 workflow_manager.update_state(current_message, current_speaker)
                 
-                # Handle terminal states
                 if workflow_manager.state in ['completed', 'error']:
+                    logger.info(f"Workflow terminated in state: {workflow_manager.state}")
                     return None, None
                 
-                # If state just transitioned to displaying_stories, trigger User_Agent
-                if workflow_manager.state == 'displaying_stories':
-                    if current_speaker == 'BA_Agent':
-                        logger.info("Triggering User_Agent to display stories.")
-                        return user_agent, None
+                next_agent = workflow_manager.get_current_agent()
+                if not next_agent:
+                    logger.error(f"No agent mapped for state {workflow_manager.state}")
+                    return None, None
                 
-                # Default: let the speaker selection function decide
-                return None, None
+                allowed_next = workflow_manager.allowed_transitions.get(sender, [])
+                if next_agent not in allowed_next and workflow_manager.state != 'creating_tickets':
+                    logger.warning(f"Invalid transition from {current_speaker} to {next_agent.name}")
+                    return None, None
+                
+                logger.info(f"Transitioning from {current_speaker} to {next_agent.name}")
+                return next_agent, current_message
             
-            # Register message handler for each agent individually
-            for agent in [ba_agent, user_agent, jira_agent]:
-                agent.register_reply(
-                    [agent],  # List of agents that can trigger this handler
-                    message_handler
-                )
-                logger.info(f"Registered message handler for {agent.name}")
+            manager.register_reply(
+                [ba_agent, user_agent, jira_agent],
+                reply_func=message_handler
+            )
             
-            return manager
-        
-        # Create manager with registered handlers
-        manager = create_manager()
-        
-        # Start conversation with BA Agent
-        ba_agent.initiate_chat(
-            manager,
-            message=f"""Call the process_requirements_wrapper function with file_path='{file_path}' to read the requirements and generate a JSON list of Jira stories. Return the JSON list directly (e.g., [{{"summary": "User login", "description": "Requirement: User login"}}]). If the file is empty or invalid, return []."""
-        )
-        
-        # Wait for workflow to complete
-        while workflow_manager.state not in ['completed', 'error']:
-            time.sleep(1)  # Prevent busy waiting
-        
-        if workflow_manager.state == 'error':
-            raise Exception(f"Workflow failed: {workflow_manager.error_message}")
-        
-        logger.info("Agent workflow completed successfully")
-        return
-        
-    except Exception as e:
-        logger.error(f"Error in agent workflow: {str(e)}", exc_info=True)
-        raise
-
+            # Start conversation
+            ba_agent.initiate_chat(
+                manager,
+                message=f"""Call the process_requirements_wrapper function with file_path='{file_path}' to read the requirements and generate a JSON list of Jira stories. Return the JSON list directly (e.g., [{{"summary": "User login", "description": "Requirement: User login"}}]). If the file is empty or invalid, return []."""
+            )
+            
+            logger.info("Agent workflow completed successfully")
+            return
+            
+        except Exception as e:
+            if "rate limit" in str(e).lower() or "quota" in str(e).lower():
+                logger.warning(f"Rate limit exceeded, attempt {attempt}/{max_attempts}. Retrying in 60 seconds.")
+                time.sleep(60)
+                attempt += 1
+            else:
+                logger.error(f"Error in agent workflow: {str(e)}", exc_info=True)
+                raise
     
+    logger.error("Max retry attempts reached for rate limit error")
+    raise Exception("API quota limit exceeded after multiple retries")
