@@ -1,157 +1,161 @@
 import streamlit as st
 import os
-import sys
 from pathlib import Path
-import logging
 import json
 from datetime import datetime
+from src.orchestrator import initialize_supervisor, run_requirements_processing, run_jira_creation
+from src.tools.file_tools import write_file, read_file
+import logging
+import time
 
-# Add project root to Python path
-project_root = str(Path(__file__).parent.parent)
-sys.path.append(project_root)
-
-from autogen import GroupChat
-from src.orchestrator import start_agent_workflow, custom_speaker_selection
-from src.agents.user_agent import user_agent
-from src.agents.ba_agent import ba_agent
-from src.agents.jira_agent import jira_agent
-
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/app_log.txt'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
+# Project root
+project_root = str(Path(__file__).parent.parent)
+
 def init_session_state():
-    """Initialize all session state variables."""
-    if "workflow_status" not in st.session_state:
-        st.session_state["workflow_status"] = "initial"
-    if "chat_manager" not in st.session_state:
-        st.session_state["chat_manager"] = None
+    """Initialize Streamlit session state"""
+    if "workflow_phase" not in st.session_state:
+        st.session_state.workflow_phase = "initial" # initial, processing, approval, creating_jira, done
+    if "workflow_id" not in st.session_state:
+        st.session_state.workflow_id = None
     if "uploaded_file_path" not in st.session_state:
-        st.session_state["uploaded_file_path"] = None
-    if "stories_approved" not in st.session_state:
-        st.session_state["stories_approved"] = False
-    if "stories_file" not in st.session_state:
-        st.session_state["stories_file"] = None
-    if "code_approved" not in st.session_state:
-        st.session_state["code_approved"] = False
-    if "code_file" not in st.session_state:
-        st.session_state["code_file"] = None
+        st.session_state.uploaded_file_path = None
+    if "stories_file_path" not in st.session_state:
+        st.session_state.stories_file_path = None
+    if "current_stories" not in st.session_state:
+        st.session_state.current_stories = None
+
+def reset_workflow():
+    """Resets the workflow state."""
+    st.session_state.workflow_phase = "initial"
+    st.session_state.workflow_id = None
+    st.session_state.uploaded_file_path = None
+    st.session_state.stories_file_path = None
+    st.session_state.current_stories = None
+    # Keep the supervisor initialized
+    if 'supervisor' in st.session_state:
+        del st.session_state['supervisor']
+
+
+def display_approval_ui():
+    """Displays the UI for story approval."""
+    stories = st.session_state.get("current_stories")
+    if not stories:
+        st.error("Could not load stories for approval.")
+        return
+
+    st.subheader("Generated Stories for Your Approval")
+    if isinstance(stories, list):
+        for idx, story in enumerate(stories, 1):
+            with st.expander(f"Story {idx}: {story.get('summary', 'No Summary')}", expanded=True):
+                st.write("**Description:**", story.get('description', 'No Description'))
+    else:
+        st.warning("Stories data is not in the expected format.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Approve Stories"):
+            st.session_state.workflow_phase = "creating_jira"
+            st.rerun()
+
+    with col2:
+        if st.button("Reject Stories"):
+            st.session_state.workflow_phase = "done"
+            st.warning("Stories rejected. Workflow terminated.")
+            st.rerun()
 
 def main():
-    st.title("SDLC Automation")
-    
-    # Initialize session state
+    st.title("SDLC Automation (Supervisor Orchestrated)")
+
+    # Initialize state and supervisor agent
     init_session_state()
+    supervisor = initialize_supervisor()
     
-    # Debug info
-    st.sidebar.write("Debug Info:")
-    st.sidebar.write(f"Workflow Status: {st.session_state['workflow_status']}")
-    st.sidebar.write(f"Stories File: {st.session_state.get('stories_file', 'None')}")
-    st.sidebar.write(f"Stories Approved: {st.session_state['stories_approved']}")
-    st.sidebar.write(f"Program File: {st.session_state.get('code_file', 'None')}")
-    st.sidebar.write(f"Code Approved: {st.session_state['code_approved']}")
-    st.sidebar.write(f"Chat Manager: {'Active' if st.session_state.get('chat_manager') else 'None'}")
+    # -- Workflow State Machine --
     
-    # File upload
-    uploaded_file = st.file_uploader("Upload Requirements File", type=["txt"])
-    
-    if uploaded_file is not None:
-        # Create input directory if it doesn't exist
-        input_dir = os.path.join(project_root, "input")
-        os.makedirs(input_dir, exist_ok=True)
+    # 1. Initial State: File Upload
+    if st.session_state.workflow_phase == "initial":
+        uploaded_file = st.file_uploader("Choose a requirements file", type=['txt'])
         
-        # Generate timestamped filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        new_filename = f"upload_{timestamp}.txt"
-        file_path = os.path.join(input_dir, new_filename)
-        
-        # Save uploaded file with new name
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        # Store file path in session state
-        st.session_state["uploaded_file_path"] = file_path
-        st.success(f"File uploaded and saved as: {new_filename}")
-        
-        # Log the actual file path
-        logger.info(f"Saved uploaded file to: {file_path}")
-    
-    # Process Requirements Button
-    if st.button("Process Requirements") and st.session_state["uploaded_file_path"]:
-        if st.session_state["workflow_status"] == "initial":
-            st.info("Processing requirements...")
-            try:
-                # Log the file being processed
-                logger.info(f"Processing file: {st.session_state['uploaded_file_path']}")
-                start_agent_workflow(st.session_state["uploaded_file_path"])
-                st.rerun()  # Rerun to update UI
-            except Exception as e:
-                st.error(f"Error starting workflow: {str(e)}")
-    
-    # Display stories if generated
-    if st.session_state["workflow_status"] == "stories_generated":
-        stories_file = st.session_state.get("stories_file")
-        if stories_file:
-            stories_path = os.path.join(project_root, "stories", stories_file)
-            if os.path.exists(stories_path):
-                st.subheader("Generated Stories")
-                with open(stories_path, 'r') as f:
-                    stories = json.load(f)
-                    st.json(stories)
-                
-                # Show the actual stories file path
-                st.sidebar.write(f"Current Stories File: {stories_file}")
-                
-                # Approve Stories Button
-                if not st.session_state["stories_approved"]:
-                    if st.button("Approve Stories", key="approve_stories"):
-                        # Set approval state
-                        st.session_state["stories_approved"] = True
-                        st.session_state["workflow_status"] = "stories_approved"
-                        st.success("Stories approved! Creating Jira tickets...")
-                        
-                        # Get chat manager and continue conversation
-                        chat_manager = st.session_state.get("chat_manager")
-                        if chat_manager:
-                            try:
-                                user_agent.initiate_chat(
-                                    chat_manager,
-                                    message="Stories approved. Please proceed with creating Jira tickets."
-                                )
-                                st.rerun()  # Rerun to update UI
-                            except Exception as e:
-                                st.error(f"Error updating chat: {str(e)}")
-                        else:
-                            st.error("Chat manager not active. Please restart the workflow.")
-    
-    # Display generated code
-    if st.session_state["workflow_status"] == "code_generated":
-        program_file = st.session_state.get("code_file")
-        if program_file and os.path.exists(program_file):
-            st.subheader("Generated Program")
-            with open(program_file, 'r') as f:
-                code = f.read()
-                st.code(code, language="python")
+        if uploaded_file:
+            input_dir = os.path.join(project_root, "input")
+            os.makedirs(input_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            new_filename = f"upload_{timestamp}.txt"
+            file_path = os.path.join(input_dir, new_filename)
             
-            # Approve Code Button
-            if not st.session_state["code_approved"]:
-                if st.button("Approve Code", key="approve_code"):
-                    # Set approval state
-                    st.session_state["code_approved"] = True
-                    st.session_state["workflow_status"] = "code_approved"
-                    st.success("Code approved! Workflow completed.")
-                    
-                    # Get chat manager and end conversation
-                    chat_manager = st.session_state.get("chat_manager")
-                    if chat_manager:
-                        try:
-                            user_agent.initiate_chat(
-                                chat_manager,
-                                message="Code approved. Workflow completed."
-                            )
-                            st.rerun()  # Rerun to update UI
-                        except Exception as e:
-                            st.error(f"Error updating chat: {str(e)}")
-                    else:
-                        st.error("Chat manager not active. Please restart the workflow.")
+            # Use file_tools.write_file instead of direct file writing
+            file_content = uploaded_file.getvalue().decode('utf-8')
+            success = write_file(file_path, file_content)
+            
+            if success:
+                st.session_state.uploaded_file_path = file_path
+                st.success(f"File uploaded: {new_filename}")
+            else:
+                st.error("Failed to upload file. Please try again.")
+        
+        if st.button("Start Workflow") and st.session_state.uploaded_file_path:
+            st.session_state.workflow_phase = "processing"
+            st.session_state.workflow_id = f"wf_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            st.rerun()
+
+    # 2. Requirements Processing
+    elif st.session_state.workflow_phase == "processing":
+        with st.spinner("Processing requirements..."):
+            stories_path = run_requirements_processing(supervisor, st.session_state.uploaded_file_path)
+        
+        if stories_path:
+            st.session_state.stories_file_path = stories_path
+            # Load stories for display using file_tools
+            try:
+                stories_content = read_file(stories_path)
+                if "Error reading file" not in stories_content:
+                    st.session_state.current_stories = json.loads(stories_content)
+                else:
+                    st.error(f"Failed to load stories: {stories_content}")
+                    reset_workflow()
+            except Exception as e:
+                st.error(f"Failed to load stories: {e}")
+                reset_workflow()
+            st.session_state.workflow_phase = "approval"
+        else:
+            st.error("Failed to process requirements.")
+            reset_workflow()
+        st.rerun()
+
+    # 3. User Approval
+    elif st.session_state.workflow_phase == "approval":
+        display_approval_ui()
+
+    # 4. Jira Ticket Creation
+    elif st.session_state.workflow_phase == "creating_jira":
+        with st.spinner("Creating Jira tickets..."):
+            success = run_jira_creation(supervisor, st.session_state.stories_file_path)
+        
+        if success:
+            st.success("Jira tickets created successfully!")
+        else:
+            st.error("Failed to create Jira tickets.")
+            
+        st.session_state.workflow_phase = "done"
+        st.rerun()
+        
+    # 5. Done State
+    elif st.session_state.workflow_phase == "done":
+        st.info(f"Workflow {st.session_state.workflow_id} has finished.")
+        if st.button("Start New Workflow"):
+            reset_workflow()
+            st.rerun()
 
 if __name__ == "__main__":
     main()
