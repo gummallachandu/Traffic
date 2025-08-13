@@ -88,4 +88,26 @@ def test_new_feature(sample_requirements, monkeypatch):
 5. Use fixtures for common setup
 6. Write both unit and integration tests
 7. Test error cases
-8. Keep tests fast and focused 
+8. Keep tests fast and focused
+
+
+
+PK
+SK
+Attributes
+workflow#req123
+state
+status, current_step, next_agent, last_updated, is_completed
+workflow#req123
+agent#BA
+input, output, timestamp, status
+workflow#req123
+agent#QA
+test_result, deployed_url, timestamp, status
+workflow#req123
+user#456
+action, feedback, timestamp
+workflow#req123
+metadata
+requirement_type, priority, created_by, created_at
+
