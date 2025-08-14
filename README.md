@@ -92,22 +92,11 @@ def test_new_feature(sample_requirements, monkeypatch):
 
 
 
-PK
-SK
-Attributes
-workflow#req123
-state
-status, current_step, next_agent, last_updated, is_completed
-workflow#req123
-agent#BA
-input, output, timestamp, status
-workflow#req123
-agent#QA
-test_result, deployed_url, timestamp, status
-workflow#req123
-user#456
-action, feedback, timestamp
-workflow#req123
-metadata
-requirement_type, priority, created_by, created_at
+Why 405 Method Not Allowed Happens with Streamlit’s st.file_uploader
+The error occurs not because of your Python or Streamlit code, but typically because of how traffic is routed in front of the app. Streamlit’s st.file_uploader always sends a POST request to a specific internal endpoint (often /_stcore/upload). When you see a 405 error (AxiosError), it means that the HTTP method (POST in this case) is not allowed for the intended endpoint. This is usually due to:
 
+Proxy, load balancer, or API gateway misconfiguration: If you deploy Streamlit behind a proxy (like NGINX, Kong, AWS ALB, etc.), the proxy might not forward POST requests to the correct base URL or handle Streamlit's internal upload routes correctly.
+
+Missing CORS or XSRF settings: Proxy or firewall rules may block POST requests, or incorrect CORS configurations may prevent uploads.
+
+Incorrect routing/base path: If the base path is not set properly (for example when deploying inside Docker, Kubernetes, or with custom ingress), uploads may hit the wrong endpoint and be rejected.
