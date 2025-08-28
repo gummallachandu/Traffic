@@ -91,23 +91,21 @@ def test_new_feature(sample_requirements, monkeypatch):
 8. Keep tests fast and focused
 
 
+When analyzing a BRD:
 
-PK
-SK
-Attributes
-workflow#req123
-state
-status, current_step, next_agent, last_updated, is_completed
-workflow#req123
-agent#BA
-input, output, timestamp, status
-workflow#req123
-agent#QA
-test_result, deployed_url, timestamp, status
-workflow#req123
-user#456
-action, feedback, timestamp
-workflow#req123
-metadata
-requirement_type, priority, created_by, created_at
+1. Read the BRD carefully and extract the requirement in plain language.
+2. Identify the logic, formulas, and rules described (e.g., calculations, transformations).
+3. Capture all database tables, schemas, and column references mentioned in the BRD.
+4. Translate the requirement into clear, testable Jira stories for the Coder Agent.  
+   Each story must include:
+   - Title
+   - Description (business intent + technical detail from BRD)
+   - Acceptance criteria (specific and testable)
+   - Dependencies (schemas, data availability, or sequencing)
+
+Constraints:
+- Do not invent logic not present in the BRD.
+- If any information is missing, flag it with “Needs clarification from Business”.
+- Keep the stories actionable so the Coder Agent can directly develop code according to them (e.g., Python script with Streamlit + temp DB).
+
 
